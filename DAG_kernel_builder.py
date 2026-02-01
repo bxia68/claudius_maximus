@@ -107,7 +107,7 @@ class DAGKernelBuilder(KernelBuilder):
         self.cache_versions = [0] * 1536
         self.instruction_count = 0
         self.finished_set = set()
-        self.barrier_list = []
+        # self.barrier_list = []
 
     def add_node(self, instruction: Instruction):
         # add instruction
@@ -132,6 +132,7 @@ class DAGKernelBuilder(KernelBuilder):
             self.cache_versions[dst] += 1
             self.dst_version[(instruction.graph_id, dst)] = self.cache_versions[dst]
     
+    # TODO: impl
     # def add_barrier(self) -> int:
     #     barrier_id = self.instruction_count
     #     self.instruction_count += 1
@@ -187,5 +188,7 @@ class DAGKernelBuilder(KernelBuilder):
                     if self.indegree[adj_id] == 0:
                         job_queue.append(adj_id)
         
-        return compiled_instructions
+        self.instrs.extend(compiled_instructions)
+        self.clear()
+
     

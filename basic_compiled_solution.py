@@ -25,28 +25,6 @@ from DAG_kernel_builder import (
 
 
 class BasicCompiledSolution(DAGKernelBuilder):
-    def build_vhash(self, val_hash_addr, tmp1, tmp2, round, i, tmp_broad1, tmp_broad2):
-        slots = []
-
-        for hi, (op1, val1, op2, op3, val3) in enumerate(HASH_STAGES):
-            slots.append(
-                (
-                    "valu", [
-                        ("vbroadcast", tmp_broad1, self.scratch_const(val1)),
-                        ("vbroadcast", tmp_broad2, self.scratch_const(val3)), 
-                    ]
-                )
-            )
-
-            slots.append(("valu", (op1, tmp1, val_hash_addr, tmp_broad1)))
-            slots.append(("valu", (op3, tmp2, val_hash_addr, tmp_broad2)))
-            slots.append(("valu", (op2, val_hash_addr, tmp1, tmp2)))
-            
-            for j in range(8):
-                slots.append(("debug", ("compare", val_hash_addr + j, (round, i + j, "hash_stage", hi))))
-
-        return slots
-
     def build_kernel(
         self, forest_height: int, n_nodes: int, batch_size: int, rounds: int
     ):
@@ -124,11 +102,21 @@ class BasicCompiledSolution(DAGKernelBuilder):
         tmp3_v = self.alloc_scratch("tmp3", block_size * vector_size)
         # tmp4_v = self.alloc_scratch("tmp4", block_size * vector_size)
         # tmp5_v = self.alloc_scratch("tmp5", block_size * vector_size)
-        tmp_idx_v = self.alloc_scratch("tmp_idx", block_size * vector_size)
-        tmp_val_v = self.alloc_scratch("tmp_val", block_size * vector_size)
+        # tmp_idx_v = self.alloc_scratch("tmp_idx", block_size * vector_size)
+        # tmp_val_v = self.alloc_scratch("tmp_val", block_size * vector_size)
         tmp_node_val_v = self.alloc_scratch("tmp_node_val", block_size * vector_size)
         tmp_addr_v = self.alloc_scratch("tmp_addr", block_size * vector_size)
         
+        idx_array = self.alloc_scratch("idx_array", 256)
+        val_array = self.alloc_scratch("val_array", 256)
+        for i in range(0, 256, 8):
+            tmp_addr_1 = tmp_addr_v
+            tmp_addr_2 = tmp_addr_v + 1
+            self.add_node(Instruction("alu", ("+", tmp_addr_1, self.scratch["inp_indices_p"], self.scratch_const(i)))) 
+            self.add_node(Instruction("load", ("vload", idx_array + i, tmp_addr_1)))
+            self.add_node(Instruction("alu", ("+", tmp_addr_2, self.scratch["inp_values_p"], self.scratch_const(i))))
+            self.add_node(Instruction("load", ("vload", val_array + i, tmp_addr_2)))
+
         for group_id in range(batch_size // (block_size * vector_size)):
             for block_id in range(block_size):
                 self.scratch_const(group_id * block_size * vector_size + block_id * vector_size)
@@ -138,7 +126,6 @@ class BasicCompiledSolution(DAGKernelBuilder):
                 for block_id in range(block_size): # complete block_size * vector_size after loop finishes
                     # each iteration will complete 8 inputs at a time
                     i = group_id * block_size * vector_size + block_id * vector_size
-                    i_const = self.scratch_const(i)
                     
                     # assign block registers
                     tmp1 = tmp1_v + block_id * vector_size
@@ -146,63 +133,43 @@ class BasicCompiledSolution(DAGKernelBuilder):
                     tmp3 = tmp3_v + block_id * vector_size
                     # tmp4 = tmp4_v + block_id * vector_size
                     # tmp5 = tmp5_v + block_id * vector_size
-                    tmp_idx = tmp_idx_v + block_id * vector_size
-                    tmp_val = tmp_val_v + block_id * vector_size 
                     tmp_node_val = tmp_node_val_v + block_id * vector_size
                     tmp_addr = tmp_addr_v + block_id * vector_size
                     
-                    # TODO: cache at start
-                    # idx = mem[inp_indices_p + i] (vectorized)
-                    self.add_node(Instruction("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], i_const))) 
-                    self.add_node(Instruction("load", ("vload", tmp_idx, tmp_addr)))
-                    
-                    # val = mem[inp_values_p + i] (vectorized)
-                    self.add_node(Instruction("alu", ("+", tmp_addr, self.scratch["inp_values_p"], i_const)))
-                    self.add_node(Instruction("load", ("vload", tmp_val, tmp_addr)))
+                    tmp_idx = idx_array + i
+                    tmp_val = val_array + i
 
                     # pull tree nodes
                     for j in range(8):
                         self.add_node(Instruction("alu", ("+", tmp_addr + j, self.scratch["forest_values_p"], tmp_idx + j)))
                         self.add_node(Instruction("load", ("load", tmp_node_val + j, tmp_addr + j)))
 
-                    # val = myhash(val ^ node_val) (vectorized)
+                    # val = myhash(val ^ node_val) (vectorized) # TODO: fma the hash?
                     self.add_node(Instruction("valu", ("^", tmp_val, tmp_val, tmp_node_val)))
                     for hi, (op1, _, op2, op3, _) in enumerate(HASH_STAGES):
                         self.add_node(Instruction("valu", (op1, tmp1, tmp_val, hash_array1 + hi * vector_size)))
                         self.add_node(Instruction("valu", (op3, tmp2, tmp_val, hash_array2 + hi * vector_size)))
                         self.add_node(Instruction("valu", (op2, tmp_val, tmp1, tmp2)))
 
-                    # idx = 2*idx + (1 if val % 2 == 0 else 2)
+                    # idx = 2*idx + (1 if val % 2 == 0 else 2) # TODO: not needed on 10th iteration
                     self.add_node(Instruction("valu", ("%", tmp1, tmp_val, two_const_v)))
                     self.add_node(Instruction("valu", ("==", tmp1, tmp1, zero_const_v)))
                     self.add_node(Instruction("flow", ("vselect", tmp3, tmp1, one_const_v, two_const_v)))
-                    self.add_node(Instruction("valu", ("*", tmp_idx, tmp_idx, two_const_v)))
-                    self.add_node(Instruction("valu", ("+", tmp_idx, tmp_idx, tmp3)))
+                    self.add_node(Instruction("valu", ("multiply_add", tmp_idx, tmp_idx, two_const_v, tmp3)))
 
-                    # idx = 0 if idx >= n_nodes else idx
+                    # idx = 0 if idx >= n_nodes else idx # TODO: not needed
                     self.add_node(Instruction("valu", ("<", tmp1, tmp_idx, n_nodes_v)))
                     self.add_node(Instruction("flow", ("vselect", tmp_idx, tmp1, tmp_idx, zero_const_v)))
-
-                    # mem[inp_indices_p + i] = idx
-                    self.add_node(Instruction("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], i_const)))
-                    self.add_node(Instruction("store", ("vstore", tmp_addr, tmp_idx)))
-
-                    # mem[inp_values_p + i] = val
-                    self.add_node(Instruction("alu", ("+", tmp_addr, self.scratch["inp_values_p"], i_const)))
-                    self.add_node(Instruction("store", ("vstore", tmp_addr, tmp_val)))
                     
+        for i in range(0, 256, 8):
+            tmp_addr_1 = tmp_addr_v
+            tmp_addr_2 = tmp_addr_v + 1
+            self.add_node(Instruction("alu", ("+", tmp_addr_1, self.scratch["inp_indices_p"], self.scratch_const(i)))) 
+            self.add_node(Instruction("store", ("vstore", tmp_addr_1, idx_array + i)))
+            self.add_node(Instruction("alu", ("+", tmp_addr_2, self.scratch["inp_values_p"], self.scratch_const(i))))
+            self.add_node(Instruction("store", ("vstore", tmp_addr_2, val_array + i)))
 
-                body_instrs = self.compile_kernel()
-                self.instrs.extend(body_instrs)
-                self.clear()
-                # for i in range(block_size):
-                self.instrs.append(
-                    {"debug": 
-                        [("vcompare", tmp_idx_v, 
-                            [(round, group_id * block_size * vector_size + j, "wrapped_idx") for j in range(vector_size)]
-                        )]
-                    }
-                )
-
+        self.compile_kernel()
+        
         # Required to match with the yield in reference_kernel2
         self.instrs.append({"flow": [("pause",)]})

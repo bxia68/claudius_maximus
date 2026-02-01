@@ -48,6 +48,10 @@ from basic_compiled_solution import (
     BasicCompiledSolution
 )
 
+from specialized_compiled_solution import (
+    SpecializedCompiledSolution
+)
+
 BASELINE = 147734
 
 def do_kernel_test(
@@ -65,7 +69,8 @@ def do_kernel_test(
     mem = build_mem_image(forest, inp)
 
     # TODO: change for different kernel
-    kb = BasicCompiledSolution()
+    kb = SpecializedCompiledSolution()
+    # kb = BasicCompiledSolution()
     # kb = BasicVectorizedKernelBuilder()
     # kb = KernelBuilder()
     kb.build_kernel(forest.height, len(forest.values), len(inp.indices), rounds)
