@@ -17,8 +17,10 @@ def kernel(kb: DAGKernelBuilder):
     # tmp5_v = kb.alloc_scratch("tmp5_v", BLOCK_SIZE * VECTOR_SIZE)
     # tmp_idx_v = kb.alloc_scratch("tmp_idx", BLOCK_SIZE * VECTOR_SIZE)
     # tmp_val_v = kb.alloc_scratch("tmp_val", BLOCK_SIZE * VECTOR_SIZE)
-    tmp_node_val_v = kb.alloc_scratch("tmp_node_val_v", BLOCK_SIZE * VECTOR_SIZE)
+
+    # tmp_node_val_v = kb.alloc_scratch("tmp_node_val_v", BLOCK_SIZE * VECTOR_SIZE)
     # tmp_addr_v = kb.alloc_scratch("tmp_addr_v", BLOCK_SIZE * VECTOR_SIZE)
+    tmp_node_val_v = kb.alloc_scratch("tmp_node_val_v", 256)
     tmp_addr_v = kb.alloc_scratch("tmp_addr_v", 256)
 
     idx_array = kb.alloc_scratch("idx_array", 256)
@@ -53,12 +55,12 @@ def kernel(kb: DAGKernelBuilder):
 
 def round_kernel(kb: DAGKernelBuilder, round_num: int):
     if round_num == 0 or round_num == 11:
-        round_0_kernel(kb)
+        round_0_kernel(kb, preloaded=(round_num > 0))
     else:
         generic_round_kernel(kb, round_num)
-    
-    if round_num == 2:
-        kb.compile_kernel()
+
+    # if round_num == 2:
+    #     kb.compile_kernel()
 
 
 def generic_round_kernel(kb: DAGKernelBuilder, round_num: int):
@@ -73,8 +75,11 @@ def generic_round_kernel(kb: DAGKernelBuilder, round_num: int):
             tmp3 = kb.scratch["tmp3_v"] + block_id * VECTOR_SIZE
             # tmp4 = tmp4_v + block_id * VECTOR_SIZE
             # tmp5 = tmp5_v + block_id * VECTOR_SIZE
-            tmp_node_val = kb.scratch["tmp_node_val_v"] + block_id * VECTOR_SIZE
-            tmp_addr = kb.scratch["tmp_addr_v"] + block_id * VECTOR_SIZE
+
+            # tmp_node_val = kb.scratch["tmp_node_val_v"] + block_id * VECTOR_SIZE
+            # tmp_addr = kb.scratch["tmp_addr_v"] + block_id * VECTOR_SIZE
+            tmp_node_val = kb.scratch["tmp_node_val_v"] + i
+            tmp_addr = kb.scratch["tmp_addr_v"] + i
 
             tmp_idx = kb.scratch["idx_array"] + i
             tmp_val = kb.scratch["val_array"] + i
@@ -94,19 +99,19 @@ def generic_round_kernel(kb: DAGKernelBuilder, round_num: int):
             if round_num != 10:
                 # idx = 2*idx + (1 if val % 2 == 0 else 2) # TODO: not needed on 10th iteration
                 kb.add_node(Instruction("valu", ("%", tmp1, tmp_val, kb.scratch["two_const_v"])))
-                kb.add_node(Instruction("valu", ("==", tmp1, tmp1, kb.scratch["zero_const_v"])))
-                kb.add_node(Instruction("flow", ("vselect", tmp3, tmp1, kb.scratch["one_const_v"], kb.scratch["two_const_v"])))
+                kb.add_node(Instruction("flow", ("vselect", tmp3, tmp1, kb.scratch["two_const_v"], kb.scratch["one_const_v"])))
                 kb.add_node(Instruction("valu", ("multiply_add", tmp_idx, tmp_idx, kb.scratch["two_const_v"], tmp3)))
             else:
                 # idx = root (0) if on level 10
                 kb.add_node(Instruction("valu", ("&", tmp_idx, kb.scratch["zero_const_v"], kb.scratch["zero_const_v"])))
 
 
-def round_0_kernel(kb: DAGKernelBuilder):
+def round_0_kernel(kb: DAGKernelBuilder, preloaded=False):
     # pull tree nodes (all nodes are the same root node)
     root_val = kb.scratch["tmp4_v"]
-    kb.add_node(Instruction("load", ("load", root_val, kb.scratch["forest_values_p"])))
-    kb.add_node(Instruction("valu", ("vbroadcast", root_val, root_val)))
+    if not preloaded:
+        kb.add_node(Instruction("load", ("load", root_val, kb.scratch["forest_values_p"])))
+        kb.add_node(Instruction("valu", ("vbroadcast", root_val, root_val)))
 
     for group_id in range(CHARACTER_COUNT // (BLOCK_SIZE * VECTOR_SIZE)):
         for block_id in range(BLOCK_SIZE):
@@ -129,6 +134,5 @@ def round_0_kernel(kb: DAGKernelBuilder):
 
             # idx = 2*idx + (1 if val % 2 == 0 else 2)
             kb.add_node(Instruction("valu", ("%", tmp1, tmp_val, kb.scratch["two_const_v"])))
-            kb.add_node(Instruction("valu", ("==", tmp1, tmp1, kb.scratch["zero_const_v"])))
-            kb.add_node(Instruction("flow", ("vselect", tmp3, tmp1, kb.scratch["one_const_v"], kb.scratch["two_const_v"])))
+            kb.add_node(Instruction("flow", ("vselect", tmp3, tmp1, kb.scratch["two_const_v"], kb.scratch["one_const_v"])))
             kb.add_node(Instruction("valu", ("multiply_add", tmp_idx, tmp_idx, kb.scratch["two_const_v"], tmp3)))
