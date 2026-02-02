@@ -4,9 +4,9 @@ from DAG_kernel_builder import DAGKernelBuilder, Instruction
 
 CHARACTER_COUNT = 256
 ROUNDS = 16
-BLOCK_SIZE = 8
+BLOCK_SIZE = 4
 VECTOR_SIZE = 8
-
+LEVEL_COUNT = 11
 
 def kernel(kb: DAGKernelBuilder):
     # vector const registers
@@ -43,18 +43,16 @@ def kernel(kb: DAGKernelBuilder):
     # tmp_idx_v = kb.alloc_scratch("tmp_idx", BLOCK_SIZE * VECTOR_SIZE)
     # tmp_val_v = kb.alloc_scratch("tmp_val", BLOCK_SIZE * VECTOR_SIZE)
 
-    # tmp_node_val_v = kb.alloc_scratch("tmp_node_val_v", BLOCK_SIZE * VECTOR_SIZE)
-    # tmp_addr_v = kb.alloc_scratch("tmp_addr_v", BLOCK_SIZE * VECTOR_SIZE)
-    tmp_node_val_v = kb.alloc_scratch("tmp_node_val_v", 256)
-    tmp_addr_v = kb.alloc_scratch("tmp_addr_v", 256)
+    tmp_node_val_v = kb.alloc_scratch("tmp_node_val_v", BLOCK_SIZE * VECTOR_SIZE)
+    tmp_addr_v = kb.alloc_scratch("tmp_addr_v", BLOCK_SIZE * VECTOR_SIZE)
 
     kb.alloc_scratch("round0_cache", 8)
     kb.alloc_scratch("round1_cache", 16)
     kb.alloc_scratch("round2_cache", 32)
 
-    idx_array = kb.alloc_scratch("idx_array", 256)
-    val_array = kb.alloc_scratch("val_array", 256)
-    for i in range(0, 256, VECTOR_SIZE):
+    idx_array = kb.alloc_scratch("idx_array", CHARACTER_COUNT)
+    val_array = kb.alloc_scratch("val_array", CHARACTER_COUNT)
+    for i in range(0, CHARACTER_COUNT, VECTOR_SIZE):
         tmp_addr_1 = tmp_addr_v
         tmp_addr_2 = tmp_addr_v + 1
         kb.add_node(Instruction("alu", ("+", tmp_addr_1, kb.scratch["inp_indices_p"], kb.scratch_const(i))))
@@ -62,13 +60,10 @@ def kernel(kb: DAGKernelBuilder):
         kb.add_node(Instruction("alu", ("+", tmp_addr_2, kb.scratch["inp_values_p"], kb.scratch_const(i))))
         kb.add_node(Instruction("load", ("vload", val_array + i, tmp_addr_2)))
 
-    for round_num in range(ROUNDS):
-        round_kernel(kb, round_num)
-        # kb.compile_kernel()
-        # for i in range(0, 256, 8):
-        #     kb.instrs.append({"debug": [("vcompare", idx_array + i, [(round_num, i + j, "wrapped_idx") for j in range(8)])]})
+    # launch compute kernel        
+    generic_kernel(kb)
 
-    for i in range(0, 256, VECTOR_SIZE):
+    for i in range(0, CHARACTER_COUNT, VECTOR_SIZE):
         tmp_addr_1 = tmp_addr_v
         tmp_addr_2 = tmp_addr_v + 1
         kb.add_node(Instruction("alu", ("+", tmp_addr_1, kb.scratch["inp_indices_p"], kb.scratch_const(i))))
@@ -81,80 +76,99 @@ def kernel(kb: DAGKernelBuilder):
     # Required to match with the yield in reference_kernel2
     kb.instrs.append({"flow": [("pause",)]})
 
+HANDOFF = 8
 
-def round_kernel(kb: DAGKernelBuilder, round_num: int):
-    if round_num == 0 or round_num == 11:
-        round_0_kernel(kb, preloaded=(round_num > 0))
-    elif round_num == 1 or round_num == 12:
-        round_1_kernel(kb, preloaded=(round_num > 1))
-    elif round_num == 2 or round_num == 13:
-        round_2_kernel(kb, preloaded=(round_num > 2))
-    else:
-        generic_round_kernel(kb, round_num)
-    kb.add_node(Instruction("flow", ("trace_write", kb.scratch["idx_array"] + 248)))
-
-
-def generic_round_kernel(kb: DAGKernelBuilder, round_num: int):
+def generic_kernel(kb: DAGKernelBuilder):
+    visited = [False] * LEVEL_COUNT
     for group_id in range(CHARACTER_COUNT // (BLOCK_SIZE * VECTOR_SIZE)):
-        for block_id in range(BLOCK_SIZE):  # complete BLOCK_SIZE * VECTOR_SIZE after loop finishes
-            # each iteration will complete 8 inputs at a time
-            i = group_id * BLOCK_SIZE * VECTOR_SIZE + block_id * VECTOR_SIZE
+        for round_num in range(HANDOFF):
+            level = round_num % LEVEL_COUNT
+            if level == 0:
+                round_0_kernel(kb, group_id, visited[level])
+            elif level == 1:
+                round_1_kernel(kb, group_id, visited[level])
+            elif level == 2:
+                round_2_kernel(kb, group_id, visited[level])
+            else:
+                generic_round_kernel(kb, group_id, round_num)
+            # generic_round_kernel(kb, group_id, round_num)
+            visited[level] = True
 
-            # assign block registers
-            tmp1 = kb.scratch["tmp1_v"] + block_id * VECTOR_SIZE
-            tmp2 = kb.scratch["tmp2_v"] + block_id * VECTOR_SIZE
-            tmp3 = kb.scratch["tmp3_v"] + block_id * VECTOR_SIZE
+    for group_id in range(CHARACTER_COUNT // (BLOCK_SIZE * VECTOR_SIZE)):
+        for round_num in range(HANDOFF, ROUNDS):
+            level = round_num % LEVEL_COUNT
+            if level == 0:
+                round_0_kernel(kb, group_id, visited[level])
+            elif level == 1:
+                round_1_kernel(kb, group_id, visited[level])
+            elif level == 2:
+                round_2_kernel(kb, group_id, visited[level])
+            else:
+                generic_round_kernel(kb, group_id, round_num)
+            # generic_round_kernel(kb, group_id, round_num)
+            visited[level] = True
 
-            tmp_node_val = kb.scratch["tmp_node_val_v"] + i
-            tmp_addr = kb.scratch["tmp_addr_v"] + i
+def generic_round_kernel(kb: DAGKernelBuilder, group_id: int, round_num: int):
+    for block_id in range(BLOCK_SIZE):  # complete BLOCK_SIZE * VECTOR_SIZE after loop finishes
+        # each iteration will complete 8 inputs at a time
+        i = group_id * BLOCK_SIZE * VECTOR_SIZE + block_id * VECTOR_SIZE
 
-            tmp_idx = kb.scratch["idx_array"] + i
-            tmp_val = kb.scratch["val_array"] + i
+        # assign block registers
+        tmp1 = kb.scratch["tmp1_v"] + block_id * VECTOR_SIZE
+        tmp2 = kb.scratch["tmp2_v"] + block_id * VECTOR_SIZE
+        tmp3 = kb.scratch["tmp3_v"] + block_id * VECTOR_SIZE
 
-            # pull tree nodes
-            kb.add_node(Instruction("valu", ("+", tmp_addr, kb.scratch["tree_ptr_v"], tmp_idx)))
-            for j in range(8):
-                kb.add_node(Instruction("load", ("load", tmp_node_val + j, tmp_addr + j)))
+        tmp_node_val = kb.scratch["tmp_node_val_v"] + block_id * VECTOR_SIZE
+        tmp_addr = kb.scratch["tmp_addr_v"] + block_id * VECTOR_SIZE
 
-            # val = myhash(val ^ node_val)
-            kb.add_node(Instruction("valu", ("^", tmp_val, tmp_val, tmp_node_val)))
-            vhash(kb, tmp1, tmp2, tmp_val)
+        tmp_idx = kb.scratch["idx_array"] + i
+        tmp_val = kb.scratch["val_array"] + i
 
-            if round_num != 10:
-                # idx = 2*idx + (1 if val % 2 == 0 else 2)
-                kb.add_node(Instruction("valu", ("%", tmp1, tmp_val, kb.scratch["const_2"])))
-                kb.add_node(Instruction("flow", ("vselect", tmp3, tmp1, kb.scratch["const_2"], kb.scratch["const_1"])))
-                kb.add_node(Instruction("valu", ("multiply_add", tmp_idx, tmp_idx, kb.scratch["const_2"], tmp3)))
+        # pull tree nodes
+        kb.add_node(Instruction("valu", ("+", tmp_addr, kb.scratch["tree_ptr_v"], tmp_idx)))
+        for j in range(8):
+            kb.add_node(Instruction("load", ("load", tmp_node_val + j, tmp_addr + j)))
 
+        # val = myhash(val ^ node_val)
+        kb.add_node(Instruction("valu", ("^", tmp_val, tmp_val, tmp_node_val)))
+        vhash(kb, tmp1, tmp2, tmp_val)
 
-def round_0_kernel(kb: DAGKernelBuilder, preloaded: bool):
+        if round_num != 10:
+            # idx = 2*idx + (1 if val % 2 == 0 else 2)
+            kb.add_node(Instruction("valu", ("%", tmp1, tmp_val, kb.scratch["const_2"])))
+            kb.add_node(Instruction("flow", ("vselect", tmp3, tmp1, kb.scratch["const_2"], kb.scratch["const_1"])))
+            kb.add_node(Instruction("valu", ("multiply_add", tmp_idx, tmp_idx, kb.scratch["const_2"], tmp3)))
+        else:
+            # idx = root (0) if on level 10
+            kb.add_node(Instruction("valu", ("&", tmp_idx, kb.scratch["const_0"], kb.scratch["const_0"])))
+            
+def round_0_kernel(kb: DAGKernelBuilder, group_id: int, preloaded: bool):
     # pull tree nodes (all nodes are the same root node)
     root_val = kb.scratch["round0_cache"]
     if not preloaded:
         kb.add_node(Instruction("load", ("load", root_val, kb.scratch["forest_values_p"])))
         kb.add_node(Instruction("valu", ("vbroadcast", root_val, root_val)))
 
-    for group_id in range(CHARACTER_COUNT // (BLOCK_SIZE * VECTOR_SIZE)):
-        for block_id in range(BLOCK_SIZE):
-            i = group_id * BLOCK_SIZE * VECTOR_SIZE + block_id * VECTOR_SIZE
+    for block_id in range(BLOCK_SIZE):
+        i = group_id * BLOCK_SIZE * VECTOR_SIZE + block_id * VECTOR_SIZE
 
-            # assign block registers
-            tmp1 = kb.scratch["tmp1_v"] + block_id * VECTOR_SIZE
-            tmp2 = kb.scratch["tmp2_v"] + block_id * VECTOR_SIZE
+        # assign block registers
+        tmp1 = kb.scratch["tmp1_v"] + block_id * VECTOR_SIZE
+        tmp2 = kb.scratch["tmp2_v"] + block_id * VECTOR_SIZE
 
-            tmp_idx = kb.scratch["idx_array"] + i
-            tmp_val = kb.scratch["val_array"] + i
+        tmp_idx = kb.scratch["idx_array"] + i
+        tmp_val = kb.scratch["val_array"] + i
 
-            # val = myhash(val ^ node_val) (vectorized)
-            kb.add_node(Instruction("valu", ("^", tmp_val, tmp_val, root_val)))
-            vhash(kb, tmp1, tmp2, tmp_val)
+        # val = myhash(val ^ node_val) (vectorized)
+        kb.add_node(Instruction("valu", ("^", tmp_val, tmp_val, root_val)))
+        vhash(kb, tmp1, tmp2, tmp_val)
 
-            # idx = 0 if val % 2 == 0 else 1 (offset idx by -1 for easier select usage)
-            kb.add_node(Instruction("valu", ("%", tmp1, tmp_val, kb.scratch["const_2"])))
-            kb.add_node(Instruction("flow", ("vselect", tmp_idx, tmp1, kb.scratch["const_1"], kb.scratch["const_0"])))
+        # idx = 0 if val % 2 == 0 else 1 (offset idx by -1 for easier select usage)
+        kb.add_node(Instruction("valu", ("%", tmp1, tmp_val, kb.scratch["const_2"])))
+        kb.add_node(Instruction("flow", ("vselect", tmp_idx, tmp1, kb.scratch["const_1"], kb.scratch["const_0"])))
 
 
-def round_1_kernel(kb: DAGKernelBuilder, preloaded: bool):
+def round_1_kernel(kb: DAGKernelBuilder, group_id: int, preloaded: bool):
     # cache tree nodes
     tree_cache = kb.scratch["round1_cache"]
     left_node = tree_cache
@@ -164,34 +178,33 @@ def round_1_kernel(kb: DAGKernelBuilder, preloaded: bool):
         kb.add_node(Instruction("valu", ("vbroadcast", right_node, tree_cache + 2)))
         kb.add_node(Instruction("valu", ("vbroadcast", left_node, tree_cache + 1)))
 
-    for group_id in range(CHARACTER_COUNT // (BLOCK_SIZE * VECTOR_SIZE)):
-        for block_id in range(BLOCK_SIZE):
-            i = group_id * BLOCK_SIZE * VECTOR_SIZE + block_id * VECTOR_SIZE
+    for block_id in range(BLOCK_SIZE):
+        i = group_id * BLOCK_SIZE * VECTOR_SIZE + block_id * VECTOR_SIZE
 
-            # assign block registers
-            tmp1 = kb.scratch["tmp1_v"] + block_id * VECTOR_SIZE
-            tmp2 = kb.scratch["tmp2_v"] + block_id * VECTOR_SIZE
-            tmp3 = kb.scratch["tmp3_v"] + block_id * VECTOR_SIZE
+        # assign block registers
+        tmp1 = kb.scratch["tmp1_v"] + block_id * VECTOR_SIZE
+        tmp2 = kb.scratch["tmp2_v"] + block_id * VECTOR_SIZE
+        tmp3 = kb.scratch["tmp3_v"] + block_id * VECTOR_SIZE
 
-            tmp_idx = kb.scratch["idx_array"] + i
-            tmp_val = kb.scratch["val_array"] + i
+        tmp_idx = kb.scratch["idx_array"] + i
+        tmp_val = kb.scratch["val_array"] + i
 
-            tmp_node_val = kb.scratch["tmp_node_val_v"] + i
+        tmp_node_val = kb.scratch["tmp_node_val_v"] + block_id * VECTOR_SIZE
 
-            # match with tree_node cache
-            kb.add_node(Instruction("flow", ("vselect", tmp_node_val, tmp_idx, right_node, left_node)))
+        # match with tree_node cache
+        kb.add_node(Instruction("flow", ("vselect", tmp_node_val, tmp_idx, right_node, left_node)))
 
-            # val = myhash(val ^ node_val) (vectorized)
-            kb.add_node(Instruction("valu", ("^", tmp_val, tmp_val, tmp_node_val)))
-            vhash(kb, tmp1, tmp2, tmp_val)
+        # val = myhash(val ^ node_val) (vectorized)
+        kb.add_node(Instruction("valu", ("^", tmp_val, tmp_val, tmp_node_val)))
+        vhash(kb, tmp1, tmp2, tmp_val)
 
-            # idx = 2*(idx + 1) + (1 if val % 2 == 0 else 2) (idx is offset by -1 for easier select usage)
-            kb.add_node(Instruction("valu", ("%", tmp1, tmp_val, kb.scratch["const_2"])))
-            kb.add_node(Instruction("flow", ("vselect", tmp3, tmp1, kb.scratch["const_4"], kb.scratch["const_3"])))
-            kb.add_node(Instruction("valu", ("multiply_add", tmp_idx, tmp_idx, kb.scratch["const_2"], tmp3)))
+        # idx = 2*(idx + 1) + (1 if val % 2 == 0 else 2) (idx is offset by -1 for easier select usage)
+        kb.add_node(Instruction("valu", ("%", tmp1, tmp_val, kb.scratch["const_2"])))
+        kb.add_node(Instruction("flow", ("vselect", tmp3, tmp1, kb.scratch["const_4"], kb.scratch["const_3"])))
+        kb.add_node(Instruction("valu", ("multiply_add", tmp_idx, tmp_idx, kb.scratch["const_2"], tmp3)))
 
 
-def round_2_kernel(kb: DAGKernelBuilder, preloaded: bool):
+def round_2_kernel(kb: DAGKernelBuilder, group_id: bool, preloaded: bool):
     # cache tree nodes
     tree_cache = [kb.scratch["round2_cache"] + i * 8 for i in range(4)]
     if not preloaded:
@@ -204,36 +217,35 @@ def round_2_kernel(kb: DAGKernelBuilder, preloaded: bool):
         kb.add_node(Instruction("valu", ("vbroadcast", tree_cache[1], tree_cache[0] + 4)))
         kb.add_node(Instruction("valu", ("vbroadcast", tree_cache[0], tree_cache[0] + 3)))
 
-    for group_id in range(CHARACTER_COUNT // (BLOCK_SIZE * VECTOR_SIZE)):
-        for block_id in range(BLOCK_SIZE):
-            i = group_id * BLOCK_SIZE * VECTOR_SIZE + block_id * VECTOR_SIZE
+    for block_id in range(BLOCK_SIZE):
+        i = group_id * BLOCK_SIZE * VECTOR_SIZE + block_id * VECTOR_SIZE
 
-            # assign block registers
-            tmp1 = kb.scratch["tmp1_v"] + block_id * VECTOR_SIZE
-            tmp2 = kb.scratch["tmp2_v"] + block_id * VECTOR_SIZE
-            tmp3 = kb.scratch["tmp3_v"] + block_id * VECTOR_SIZE
+        # assign block registers
+        tmp1 = kb.scratch["tmp1_v"] + block_id * VECTOR_SIZE
+        tmp2 = kb.scratch["tmp2_v"] + block_id * VECTOR_SIZE
+        tmp3 = kb.scratch["tmp3_v"] + block_id * VECTOR_SIZE
 
-            tmp_idx = kb.scratch["idx_array"] + i
-            tmp_val = kb.scratch["val_array"] + i
+        tmp_idx = kb.scratch["idx_array"] + i
+        tmp_val = kb.scratch["val_array"] + i
 
-            tmp_node_val = kb.scratch["tmp_node_val_v"] + i
+        tmp_node_val = kb.scratch["tmp_node_val_v"] + block_id * VECTOR_SIZE
 
-            # match with tree_node cache
-            kb.add_node(Instruction("valu", ("%", tmp3, tmp_idx, kb.scratch["const_2"])))
-            kb.add_node(Instruction("flow", ("vselect", tmp1, tmp3, tree_cache[0], tree_cache[1])))
-            kb.add_node(Instruction("flow", ("vselect", tmp2, tmp3, tree_cache[2], tree_cache[3])))
-            
-            kb.add_node(Instruction("valu", ("<", tmp3, tmp_idx, kb.scratch["const_5"])))
-            kb.add_node(Instruction("flow", ("vselect", tmp_node_val, tmp3, tmp1, tmp2)))
+        # match with tree_node cache
+        kb.add_node(Instruction("valu", ("%", tmp3, tmp_idx, kb.scratch["const_2"])))
+        kb.add_node(Instruction("flow", ("vselect", tmp1, tmp3, tree_cache[0], tree_cache[1])))
+        kb.add_node(Instruction("flow", ("vselect", tmp2, tmp3, tree_cache[2], tree_cache[3])))
+        
+        kb.add_node(Instruction("valu", ("<", tmp3, tmp_idx, kb.scratch["const_5"])))
+        kb.add_node(Instruction("flow", ("vselect", tmp_node_val, tmp3, tmp1, tmp2)))
 
-            # val = myhash(val ^ node_val) (vectorized)
-            kb.add_node(Instruction("valu", ("^", tmp_val, tmp_val, tmp_node_val)))
-            vhash(kb, tmp1, tmp2, tmp_val)
+        # val = myhash(val ^ node_val) (vectorized)
+        kb.add_node(Instruction("valu", ("^", tmp_val, tmp_val, tmp_node_val)))
+        vhash(kb, tmp1, tmp2, tmp_val)
 
-            # idx = 2*idx + (1 if val % 2 == 0 else 2)
-            kb.add_node(Instruction("valu", ("%", tmp1, tmp_val, kb.scratch["const_2"])))
-            kb.add_node(Instruction("flow", ("vselect", tmp3, tmp1, kb.scratch["const_2"], kb.scratch["const_1"])))
-            kb.add_node(Instruction("valu", ("multiply_add", tmp_idx, tmp_idx, kb.scratch["const_2"], tmp3)))
+        # idx = 2*idx + (1 if val % 2 == 0 else 2)
+        kb.add_node(Instruction("valu", ("%", tmp1, tmp_val, kb.scratch["const_2"])))
+        kb.add_node(Instruction("flow", ("vselect", tmp3, tmp1, kb.scratch["const_2"], kb.scratch["const_1"])))
+        kb.add_node(Instruction("valu", ("multiply_add", tmp_idx, tmp_idx, kb.scratch["const_2"], tmp3)))
 
 
 # 12 valu instructions

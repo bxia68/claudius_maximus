@@ -51,7 +51,7 @@ class KernelBuilder:
             self.scratch[name] = addr
             self.scratch_debug[addr] = (name, length)
         self.scratch_ptr += length
-        assert self.scratch_ptr <= SCRATCH_SIZE, "Out of scratch space"
+        assert self.scratch_ptr <= SCRATCH_SIZE, f"Out of scratch space {self.scratch_ptr}"
         return addr
 
     def scratch_const(self, val, name=None):
