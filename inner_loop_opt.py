@@ -8,11 +8,9 @@ ROUNDS = 16
 VECTOR_SIZE = 8
 LEVEL_COUNT = 11
 
-BLOCK_SIZE = 4
-TILE_SIZE = 4
-BLOCK_SIZE1 = int(os.getenv("BLOCK_SIZE", 4))
-TILE_SIZE1 = int(os.getenv("TILE_SIZE", 4))
-SYNC_LIST = list(map(int, os.getenv("SYNC_LIST", "14,15").split(","))) + [16]
+BLOCK_SIZE = int(os.getenv("BLOCK_SIZE", 4))
+TILE_SIZE = int(os.getenv("TILE_SIZE", 4))
+SYNC_LIST = list(map(int, os.getenv("SYNC_LIST", "13,14,15").split(","))) + [16]
 
 
 def kernel(kb: DAGKernelBuilder):
@@ -22,7 +20,10 @@ def kernel(kb: DAGKernelBuilder):
         kb.add_node(Instruction("valu", ("vbroadcast", const_v, kb.scratch_const(i))))
 
     tree_ptr_v = kb.alloc_scratch("tree_ptr_v", VECTOR_SIZE)
+    tree_ptr_offset_v = kb.alloc_scratch("tree_ptr_offset_v", VECTOR_SIZE)
     kb.add_node(Instruction("valu", ("vbroadcast", tree_ptr_v, kb.scratch["forest_values_p"])))
+    kb.add_node(Instruction("alu", ("+", tree_ptr_offset_v, kb.scratch["forest_values_p"], kb.scratch["const_1"])))
+    kb.add_node(Instruction("valu", ("vbroadcast", tree_ptr_offset_v, tree_ptr_offset_v)))
 
     hash_array1 = kb.alloc_scratch("hash_array1", 6 * VECTOR_SIZE)
     hash_array2 = kb.alloc_scratch("hash_array2", 6 * VECTOR_SIZE)
@@ -169,7 +170,7 @@ def generic_round_kernel(kb: DAGKernelBuilder, group_id: int, block_id: int, rou
         # assign block registers
         tmp1 = kb.scratch["tmp1_v"] + block_id * TILE_SIZE * VECTOR_SIZE + tile_id * VECTOR_SIZE
         tmp2 = kb.scratch["tmp2_v"] + block_id * TILE_SIZE * VECTOR_SIZE + tile_id * VECTOR_SIZE
-        tmp3 = kb.scratch["tmp3_v"] + block_id * TILE_SIZE * VECTOR_SIZE + tile_id * VECTOR_SIZE
+        # tmp3 = kb.scratch["tmp3_v"] + block_id * TILE_SIZE * VECTOR_SIZE + tile_id * VECTOR_SIZE
 
         tmp_node_val = kb.scratch["tmp_node_val_v"] + block_id * TILE_SIZE * VECTOR_SIZE + tile_id * VECTOR_SIZE
         tmp_addr = kb.scratch["tmp_addr_v"] + block_id * TILE_SIZE * VECTOR_SIZE + tile_id * VECTOR_SIZE
@@ -186,11 +187,12 @@ def generic_round_kernel(kb: DAGKernelBuilder, group_id: int, block_id: int, rou
         kb.add_node(Instruction("valu", ("^", tmp_val, tmp_val, tmp_node_val)))
         vhash(kb, tmp1, tmp2, tmp_val)
 
-        if round_num != 10:
+        if round_num != 10 and round_num != 15:
             # idx = 2*idx + (1 if val % 2 == 0 else 2)
             kb.add_node(Instruction("valu", ("%", tmp1, tmp_val, kb.scratch["const_2"])))
-            kb.add_node(Instruction("flow", ("vselect", tmp3, tmp1, kb.scratch["const_2"], kb.scratch["const_1"])))
-            kb.add_node(Instruction("valu", ("multiply_add", tmp_idx, tmp_idx, kb.scratch["const_2"], tmp3)))
+            kb.add_node(Instruction("flow", ("vselect", tmp1, tmp1, kb.scratch["const_2"], kb.scratch["const_1"])))
+            # kb.add_node(Instruction("valu", ("+", tmp1, tmp1, kb.scratch["const_1"])))
+            kb.add_node(Instruction("valu", ("multiply_add", tmp_idx, tmp_idx, kb.scratch["const_2"], tmp1)))
         # else:
         #     # idx = root (0) if on level 10
         #     kb.add_node(Instruction("valu", ("&", tmp_idx, kb.scratch["const_0"], kb.scratch["const_0"])))
@@ -238,7 +240,7 @@ def round_1_kernel(kb: DAGKernelBuilder, group_id: int, block_id: int, preloaded
         # assign block registers
         tmp1 = kb.scratch["tmp1_v"] + block_id * TILE_SIZE * VECTOR_SIZE + tile_id * VECTOR_SIZE
         tmp2 = kb.scratch["tmp2_v"] + block_id * TILE_SIZE * VECTOR_SIZE + tile_id * VECTOR_SIZE
-        tmp3 = kb.scratch["tmp3_v"] + block_id * TILE_SIZE * VECTOR_SIZE + tile_id * VECTOR_SIZE
+        # tmp3 = kb.scratch["tmp3_v"] + block_id * TILE_SIZE * VECTOR_SIZE + tile_id * VECTOR_SIZE
 
         tmp_idx = kb.scratch["idx_array"] + i
         tmp_val = kb.scratch["val_array"] + i
@@ -254,8 +256,8 @@ def round_1_kernel(kb: DAGKernelBuilder, group_id: int, block_id: int, preloaded
 
         # idx = 2*(idx + 1) + (1 if val % 2 == 0 else 2) (idx is offset by -1 for easier future select usage)
         kb.add_node(Instruction("valu", ("&", tmp1, tmp_val, kb.scratch["const_1"])))
-        kb.add_node(Instruction("valu", ("+", tmp3, tmp1, kb.scratch["const_3"])))
-        kb.add_node(Instruction("valu", ("multiply_add", tmp_idx, tmp_idx, kb.scratch["const_2"], tmp3)))
+        kb.add_node(Instruction("valu", ("+", tmp1, tmp1, kb.scratch["const_3"])))
+        kb.add_node(Instruction("valu", ("multiply_add", tmp_idx, tmp_idx, kb.scratch["const_2"], tmp1)))
 
 
 def round_2_kernel(kb: DAGKernelBuilder, group_id: bool, block_id: int, preloaded: bool):
@@ -299,8 +301,9 @@ def round_2_kernel(kb: DAGKernelBuilder, group_id: bool, block_id: int, preloade
 
         # idx = 2*idx + (1 if val % 2 == 0 else 2)
         kb.add_node(Instruction("valu", ("%", tmp1, tmp_val, kb.scratch["const_2"])))
-        kb.add_node(Instruction("flow", ("vselect", tmp3, tmp1, kb.scratch["const_2"], kb.scratch["const_1"])))
-        kb.add_node(Instruction("valu", ("multiply_add", tmp_idx, tmp_idx, kb.scratch["const_2"], tmp3)))
+        # kb.add_node(Instruction("flow", ("vselect", tmp1, tmp1, kb.scratch["const_2"], kb.scratch["const_1"])))
+        kb.add_node(Instruction("valu", ("+", tmp1, tmp1, kb.scratch["const_1"])))
+        kb.add_node(Instruction("valu", ("multiply_add", tmp_idx, tmp_idx, kb.scratch["const_2"], tmp1)))
 
 
 def round_3_kernel(kb: DAGKernelBuilder, group_id: bool, block_id: int, preloaded: bool):
@@ -352,8 +355,9 @@ def round_3_kernel(kb: DAGKernelBuilder, group_id: bool, block_id: int, preloade
 
         # idx = 2*idx + (1 if val % 2 == 0 else 2)
         kb.add_node(Instruction("valu", ("%", tmp1, tmp_val, kb.scratch["const_2"])))
-        kb.add_node(Instruction("flow", ("vselect", tmp3, tmp1, kb.scratch["const_2"], kb.scratch["const_1"])))
-        kb.add_node(Instruction("valu", ("multiply_add", tmp_idx, tmp_idx, kb.scratch["const_2"], tmp3)))
+        # kb.add_node(Instruction("flow", ("vselect", tmp1, tmp1, kb.scratch["const_2"], kb.scratch["const_1"])))
+        kb.add_node(Instruction("valu", ("+", tmp1, tmp1, kb.scratch["const_1"])))
+        kb.add_node(Instruction("valu", ("multiply_add", tmp_idx, tmp_idx, kb.scratch["const_2"], tmp1)))
 
 
 # 12 valu instructions
